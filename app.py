@@ -1,27 +1,31 @@
 # ==============================
-# AI-Powered VBM Resume Checker
+# VBM – AI-Powered Resume Checker
 # Streamlit Version (Deployable)
 # ==============================
 
-# 1️⃣ Imports
+# 1️⃣ Install dependencies (only needed in Colab, skip if running locally/Streamlit Cloud)
+# !pip install streamlit pymupdf python-docx scikit-learn sentence-transformers matplotlib wordcloud numpy
+
+# 2️⃣ Imports
 import streamlit as st
 import fitz, docx, re, os, json, sqlite3, numpy as np
 from sklearn.metrics.pairwise import cosine_similarity
 from sentence_transformers import SentenceTransformer
+import matplotlib.pyplot as plt
 from wordcloud import WordCloud
 
-# 2️⃣ Setup
+# 3️⃣ Setup
 DB_NAME = "vbm.db"
 os.makedirs("uploads", exist_ok=True)
 embedder = SentenceTransformer("all-MiniLM-L6-v2")
 
-# Skills dictionary
+# Common skills dictionary (expandable)
 SKILLS_LIST = [
     "python","java","sql","ml","machine learning","cloud","docker","kubernetes",
     "excel","c++","tensorflow","pytorch","aws","azure","linux","git"
 ]
 
-# 3️⃣ Initialize DB
+# 4️⃣ Initialize DB
 def init_db():
     with sqlite3.connect(DB_NAME) as conn:
         c = conn.cursor()
@@ -40,14 +44,15 @@ def init_db():
                      )""")
 init_db()
 
-# 4️⃣ Helpers
+# 5️⃣ Helper Functions
 def extract_text(file_path):
     if file_path.lower().endswith(".pdf"):
         doc = fitz.open(file_path)
         return " ".join([page.get_text("text") for page in doc])
     elif file_path.lower().endswith(".docx"):
         return " ".join([p.text for p in docx.Document(file_path).paragraphs])
-    return ""
+    else:
+        return ""
 
 def clean_text(text): 
     return re.sub(r'\s+', ' ', text).strip().lower()
@@ -69,69 +74,79 @@ def parse_resume(file_path):
 def evaluate_resume(resume_text, jd_text, jd_emb=None, weight_keywords=0.5, weight_semantics=0.5):
     resume_words = set(resume_text.split())
     jd_words = set(jd_text.split())
-
+    
     # keyword overlap score
     keyword_score = len(resume_words & jd_words)/max(len(jd_words),1)
-
+    
     # semantic similarity
     if jd_emb is None: 
         jd_emb = embedder.encode([jd_text])
     resume_emb = embedder.encode([resume_text])
-    semantic_score = float(cosine_similarity([resume_emb[0]],[jd_emb[0]])[0][0])
-
+    
+    # Ensure 2D arrays for cosine_similarity
+    semantic_score = float(cosine_similarity(
+        resume_emb.reshape(1, -1),
+        jd_emb.reshape(1, -1)
+    )[0][0])
+    
     # final weighted score
     final_score = (keyword_score*weight_keywords + semantic_score*weight_semantics)*100
-
+    
     missing_skills = [s for s in SKILLS_LIST if s in jd_text and s not in resume_text]
-
+    
     verdict = "High" if final_score>=75 else "Medium" if final_score>=50 else "Low"
-
+    
     feedback = f"Score: {final_score:.1f}. " + \
                ("✅ Great match!" if verdict=="High" else 
                 "⚠️ Partial match." if verdict=="Medium" else 
                 "❌ Low alignment.")
     if missing_skills: 
         feedback += f" Missing: {', '.join(missing_skills[:10])}."
-
+    
     return final_score, verdict, missing_skills, feedback
 
 def visualize_resume(resume_json, missing_skills):
     matched_skills = [s for s in resume_json["Skills"].split() if s not in missing_skills]
+    
     st.bar_chart({"Matched Skills": len(matched_skills), "Missing Skills": len(missing_skills)})
+    
     wc = WordCloud(width=800, height=400, background_color='white').generate(resume_json["FullText"])
     st.image(wc.to_array(), caption="Resume Word Cloud")
 
-# 5️⃣ Streamlit UI
-st.title("📄 AI-Powered VBM Resume Checker")
+# 6️⃣ Streamlit UI
+st.title("📄 VBM – AI-Powered Resume Checker")
 
 jd_text = st.text_area("📌 Paste Job Description Here")
+
 resume_file = st.file_uploader("📂 Upload Resume", type=["pdf","docx"])
 
 if st.button("Evaluate") and resume_file and jd_text:
-    # Save resume
+    # Save uploaded resume
     path = os.path.join("uploads", resume_file.name)
     with open(path, "wb") as f: 
         f.write(resume_file.read())
-
+    
     resume_json = parse_resume(path)
-
+    
     # Save JD
     jd_emb = embedder.encode([jd_text])
     with sqlite3.connect(DB_NAME) as conn:
         c = conn.cursor()
         c.execute("INSERT INTO job_description (jd_text,jd_emb) VALUES (?,?)",(jd_text,jd_emb.tobytes()))
         conn.commit()
-
+    
     # Evaluate
-    score, verdict, missing_skills, feedback = evaluate_resume(resume_json["FullText"], jd_text, jd_emb=[jd_emb])
-
+    score, verdict, missing_skills, feedback = evaluate_resume(
+        resume_json["FullText"], jd_text, jd_emb=jd_emb
+    )
+    
     with sqlite3.connect(DB_NAME) as conn:
         c = conn.cursor()
         c.execute("INSERT INTO evaluations (resume_name,score,verdict,missing_skills,feedback) VALUES (?,?,?,?,?)",
                   (resume_file.name,score,verdict,json.dumps(missing_skills),feedback))
         conn.commit()
-
-    # Results
+    
+    # Display results
     st.subheader("✅ Results")
     st.json({
         "Resume": resume_file.name,
@@ -140,11 +155,11 @@ if st.button("Evaluate") and resume_file and jd_text:
         "Missing Skills": missing_skills,
         "Feedback": feedback
     })
-
+    
     st.subheader("📊 Visualizations")
     visualize_resume(resume_json, missing_skills)
 
-# 6️⃣ Past Evaluations
+# 7️⃣ Show past evaluations
 st.subheader("📂 Previous Evaluations")
 with sqlite3.connect(DB_NAME) as conn:
     c = conn.cursor()
